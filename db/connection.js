@@ -12,7 +12,8 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   ssl: {
     ca: fs.readFileSync("./db/ca.pem")
-  }
+  },
+  timezone: '-04:00'
 });
 
 export default pool;
