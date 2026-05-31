@@ -1,19 +1,11 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
-export const mailFrom = process.env.SMTP_FROM;
+const apiKey = process.env.RESEND_API_KEY;
 
-export const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT),
-  secure: Number(process.env.SMTP_PORT) === 465,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  connectionTimeout: 30000,
-  greetingTimeout: 15000,
-  socketTimeout: 60000,
-});
+export const resend = new Resend(apiKey);
+
+export const mailFrom =
+  process.env.RESEND_FROM || "HealthIA <onboarding@resend.dev>";

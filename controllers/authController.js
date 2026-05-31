@@ -1,6 +1,6 @@
 import pool from "../db/connection.js";
 import bcrypt from "bcryptjs";
-import { transporter, mailFrom } from "../config/mailer.js";
+import { resend, mailFrom } from "../config/mailer.js";
 
 const PASSWORD_RESET_WINDOW_MINUTES = Number(
   process.env.PASSWORD_RESET_WINDOW_MINUTES || 30
@@ -23,7 +23,7 @@ const storeCode = (email, purpose) => {
   const code = makeCode();
   codes.set(email, {
     code,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutos
+    expiresAt: Date.now() + 5 * 60 * 1000,
     purpose, // "register" | "reset"
     verified: false,
   });
@@ -85,13 +85,19 @@ const sendCodeEmail = async ({ to, code, purpose }) => {
       </table>
     </div>`;
 
-  await transporter.sendMail({
+  const { data, error } = await resend.emails.send({
     from: mailFrom,
-    to,
+    to: [to],
     subject,
     text,
     html,
   });
+
+  if (error) {
+    throw new Error(error.message || "No se pudo enviar el correo");
+  }
+
+  return data;
 };
 
 const getGenericResetResponse = () => ({
@@ -104,26 +110,34 @@ const getGenericResetResponse = () => ({
 ========================= */
 export const testMail = async (req, res) => {
   try {
-    const to = req.body?.to || process.env.SMTP_USER;
+    const to = req.body?.to || process.env.RESEND_FROM?.match(/<([^>]+)>/)?.[1];
 
-    await transporter.verify();
+    if (!to) {
+      return res.status(400).json({
+        message: "Destinatario requerido",
+      });
+    }
 
-    const info = await transporter.sendMail({
+    const { data, error } = await resend.emails.send({
       from: mailFrom,
-      to,
+      to: [to],
       subject: "Prueba SMTP HealthIA",
-      text: "Si recibes este correo, SMTP esta funcionando.",
-      html: "<p>Si recibes este correo, <b>SMTP esta funcionando</b>.</p>",
+      text: "Si recibes este correo, Resend esta funcionando.",
+      html: "<p>Si recibes este correo, <b>Resend esta funcionando</b>.</p>",
     });
+
+    if (error) {
+      throw new Error(error.message || "Fallo al enviar");
+    }
 
     return res.status(200).json({
       message: "Correo de prueba enviado",
-      messageId: info.messageId,
+      messageId: data?.id || null,
     });
   } catch (error) {
     console.error("testMail error:", error);
     return res.status(500).json({
-      message: "Fallo SMTP",
+      message: "Fallo al enviar correo",
       error: String(error?.message || error),
     });
   }
