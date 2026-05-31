@@ -4,10 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
   "engines": {
-  "node": ">=22.0.0 <23.0.0"
+    "node": ">=22.0.0 <23.0.0"
   },
   "keywords": [],
   "author": "",
@@ -26,7 +26,7 @@
     "nodemailer": "^8.0.5",
     "resend": "^6.1.3"
   },
-  "scripts": {
-  "start": "node server.js"
-}
+  "devDependencies": {
+    "wrangler": "^4.95.0"
+  }
 }
