@@ -7,6 +7,9 @@ import pool from "../db/connection.js";
 const normalizeMealType = (value) =>
   String(value || "").trim().toLowerCase();
 
+const normalizeUnitMeasure = (value) =>
+  String(value || "").trim().toLowerCase();
+
 const formatMealTypeLabel = (value) => {
   const v = normalizeMealType(value);
 
@@ -18,68 +21,68 @@ const formatMealTypeLabel = (value) => {
   return "Otro";
 };
 
-const getActiveUserStats = async (id_user) => {
-  const [rows] = await pool.query(
+const getActiveUserStats = async (id_user, db = pool) => {
+  const [rows] = await db.query(
     `
     SELECT * FROM user_stats
     WHERE id_user = ? AND status = 'active'
     ORDER BY changed_date DESC
     LIMIT 1
-  `,
+    `,
     [id_user]
   );
   return rows[0];
 };
 
-const getInProgressGoal = async (id_user) => {
-  const [rows] = await pool.query(
+const getInProgressGoal = async (id_user, db = pool) => {
+  const [rows] = await db.query(
     `
     SELECT * FROM goals
     WHERE id_user = ? AND status = 'inprogress'
     LIMIT 1
-  `,
+    `,
     [id_user]
   );
   return rows[0];
 };
 
-const getActiveIntensity = async (id_user) => {
-  const [rows] = await pool.query(
+const getActiveIntensity = async (id_user, db = pool) => {
+  const [rows] = await db.query(
     `
     SELECT i.*
     FROM intensity_history ih
     JOIN intensity i ON i.id = ih.intensity_id
     WHERE ih.users_id = ? AND ih.status = 'active'
     LIMIT 1
-  `,
+    `,
     [id_user]
   );
   return rows[0];
 };
 
-const getTodayDailyLog = async (id_user) => {
-  const [rows] = await pool.query(
+const getTodayDailyLog = async (id_user, db = pool) => {
+  const [rows] = await db.query(
     `
     SELECT * FROM daily_logs
     WHERE id_user = ? AND DATE(log_date) = CURDATE()
     LIMIT 1
-  `,
+    `,
     [id_user]
   );
   return rows[0];
 };
 
-const getAllFoods = async () => {
-  const [rows] = await pool.query(`SELECT * FROM foods`);
+const getAllFoods = async (db = pool) => {
+  const [rows] = await db.query(`SELECT * FROM foods`);
   return rows;
 };
 
-const insertFood = async (food) => {
-  const [result] = await pool.query(
+const insertFood = async (food, db) => {
+  const [result] = await db.query(
     `
     INSERT INTO foods (name, category, unit_measure, calories, proteins, fats, carbs)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `,
+    `,
     [
       food.name,
       food.category,
@@ -94,13 +97,13 @@ const insertFood = async (food) => {
   return result.insertId;
 };
 
-const insertIaDetection = async (data) => {
-  const [result] = await pool.query(
+const insertIaDetection = async (data, db) => {
+  const [result] = await db.query(
     `
     INSERT INTO ia_detection
     (id_daily_log, ai_prompt, estimated_calories, estimated_proteins, estimated_carbs, estimated_fats, response, type, meal_type, comments)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `,
+    `,
     [
       data.id_daily_log,
       data.ai_prompt,
@@ -118,29 +121,36 @@ const insertIaDetection = async (data) => {
   return result.insertId;
 };
 
-const insertFoodDetected = async (data) => {
-  await pool.query(
+const insertFoodDetected = async (data, db) => {
+  await db.query(
     `
     INSERT INTO food_detected (foods_id, ia_detection_id, quantity)
     VALUES (?, ?, ?)
-  `,
+    `,
     [data.foods_id, data.ia_detection_id, data.quantity]
   );
 };
 
-const updateDailyLogMacros = async (id, data) => {
-  await pool.query(
+const updateDailyLogMacros = async (id, data, db) => {
+  await db.query(
     `
     UPDATE daily_logs
-    SET food_kcal = ?, proteins = ?, carbohydrates = ?, fats = ?, net_kcal = ?
+    SET
+      food_kcal = ?,
+      proteins = ?,
+      carbohydrates = ?,
+      fats = ?,
+      net_kcal = ?,
+      water_ml = ?
     WHERE id = ?
-  `,
+    `,
     [
       data.food_kcal,
       data.proteins,
       data.carbohydrates,
       data.fats,
       data.net_kcal,
+      data.water_ml,
       id,
     ]
   );
@@ -204,10 +214,26 @@ const buildGroupedHistory = (rows) => {
   }));
 };
 
+const getMlQuantity = (food) => {
+  const unit = normalizeUnitMeasure(food.unit_measure);
+  if (unit !== "ml") return 0;
+
+  const qty = Number(food.quantity || 0);
+  return Number.isFinite(qty) && qty > 0 ? qty : 0;
+};
+
+const getFoodNumber = (value) => {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+};
+
 /* =========================
    ANALYZE + SAVE
 ========================= */
 export const processFoodScan = async (req, res) => {
+  const connection = await pool.getConnection();
+  let transactionStarted = false;
+
   try {
     const { id_user, imageBase64, mimeType, type } = req.body;
 
@@ -258,8 +284,17 @@ export const processFoodScan = async (req, res) => {
     );
 
     const detectedFoods = Array.isArray(aiResponse.detected_foods)
-      ? aiResponse.detected_foods
+      ? aiResponse.detected_foods.filter(
+          (food) => food && String(food.name || "").trim() !== ""
+        )
       : [];
+
+    if (detectedFoods.length === 0) {
+      return res.status(422).json({
+        success: false,
+        message: "Ningún alimento fue detectado",
+      });
+    }
 
     const finalFoods = [];
 
@@ -267,57 +302,85 @@ export const processFoodScan = async (req, res) => {
       let foodId = food.id;
 
       if (food.is_new || !foodId) {
-        foodId = await insertFood({
-          name: food.name,
-          category: food.category,
-          unit_measure: food.unit_measure,
-          calories: food.calories,
-          proteins: food.proteins,
-          fats: food.fats,
-          carbs: food.carbs,
-        });
+        foodId = await insertFood(
+          {
+            name: food.name,
+            category: food.category || "Desconocido",
+            unit_measure: food.unit_measure || "g",
+            calories: getFoodNumber(food.calories),
+            proteins: getFoodNumber(food.proteins),
+            fats: getFoodNumber(food.fats),
+            carbs: getFoodNumber(food.carbs),
+          },
+          connection
+        );
       }
 
-      finalFoods.push({ ...food, id: foodId });
-    }
-
-    const detectionId = await insertIaDetection({
-      id_daily_log: dailyLog.id,
-      ai_prompt: "Visión Gemini Análisis de Comida",
-      estimated_calories: aiResponse.totals?.calories || 0,
-      estimated_proteins: aiResponse.totals?.proteins || 0,
-      estimated_carbs: aiResponse.totals?.carbs || 0,
-      estimated_fats: aiResponse.totals?.fats || 0,
-      response: JSON.stringify(aiResponse),
-      type: mealType,
-      meal_type: mealType,
-      comments: aiResponse.comment || "",
-    });
-
-    for (const food of finalFoods) {
-      await insertFoodDetected({
-        foods_id: food.id,
-        ia_detection_id: detectionId,
-        quantity: food.quantity || 1,
+      finalFoods.push({
+        ...food,
+        id: foodId,
+        quantity: getFoodNumber(food.quantity) || 1,
       });
     }
 
-    await updateDailyLogMacros(dailyLog.id, {
-      food_kcal:
-        Number(dailyLog.food_kcal || 0) +
-        Number(aiResponse.totals?.calories || 0),
-      proteins:
-        Number(dailyLog.proteins || 0) +
-        Number(aiResponse.totals?.proteins || 0),
-      carbohydrates:
-        Number(dailyLog.carbohydrates || 0) +
-        Number(aiResponse.totals?.carbs || 0),
-      fats:
-        Number(dailyLog.fats || 0) + Number(aiResponse.totals?.fats || 0),
-      net_kcal:
-        Number(dailyLog.net_kcal || 0) +
-        Number(aiResponse.totals?.calories || 0),
-    });
+    const totalWaterMl = finalFoods.reduce((acc, food) => {
+      return acc + getMlQuantity(food);
+    }, 0);
+
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const detectionId = await insertIaDetection(
+      {
+        id_daily_log: dailyLog.id,
+        ai_prompt: "Visión Gemini Análisis de Comida",
+        estimated_calories: getFoodNumber(aiResponse.totals?.calories),
+        estimated_proteins: getFoodNumber(aiResponse.totals?.proteins),
+        estimated_carbs: getFoodNumber(aiResponse.totals?.carbs),
+        estimated_fats: getFoodNumber(aiResponse.totals?.fats),
+        response: JSON.stringify(aiResponse),
+        type: mealType,
+        meal_type: mealType,
+        comments: aiResponse.comment || "",
+      },
+      connection
+    );
+
+    for (const food of finalFoods) {
+      await insertFoodDetected(
+        {
+          foods_id: food.id,
+          ia_detection_id: detectionId,
+          quantity: getFoodNumber(food.quantity) || 1,
+        },
+        connection
+      );
+    }
+
+    await updateDailyLogMacros(
+      dailyLog.id,
+      {
+        food_kcal:
+          getFoodNumber(dailyLog.food_kcal) +
+          getFoodNumber(aiResponse.totals?.calories),
+        proteins:
+          getFoodNumber(dailyLog.proteins) +
+          getFoodNumber(aiResponse.totals?.proteins),
+        carbohydrates:
+          getFoodNumber(dailyLog.carbohydrates) +
+          getFoodNumber(aiResponse.totals?.carbs),
+        fats:
+          getFoodNumber(dailyLog.fats) + getFoodNumber(aiResponse.totals?.fats),
+        net_kcal:
+          getFoodNumber(dailyLog.net_kcal) +
+          getFoodNumber(aiResponse.totals?.calories),
+        water_ml: getFoodNumber(dailyLog.water_ml) + totalWaterMl,
+      },
+      connection
+    );
+
+    await connection.commit();
+    transactionStarted = false;
 
     return res.status(200).json({
       success: true,
@@ -325,11 +388,16 @@ export const processFoodScan = async (req, res) => {
       data: aiResponse,
     });
   } catch (error) {
+    if (transactionStarted) {
+      await connection.rollback();
+    }
     console.error("Error en processFoodScan:", error);
     return res.status(500).json({
       success: false,
       message: error.message,
     });
+  } finally {
+    connection.release();
   }
 };
 
@@ -380,7 +448,7 @@ export const getFoodScanHistory = async (req, res) => {
       LEFT JOIN foods f ON f.id = fd.foods_id
       WHERE d.id_user = ? AND ia.status = 'active'
       ORDER BY d.log_date DESC, ia.created_at DESC, ia.id DESC, fd.id DESC
-    `,
+      `,
       [id_user]
     );
 
@@ -441,7 +509,7 @@ export const getFoodScanDetail = async (req, res) => {
       LEFT JOIN foods f ON f.id = fd.foods_id
       WHERE ia.id = ? AND ia.status = 'active'
       ORDER BY fd.id DESC
-    `,
+      `,
       [detectionId]
     );
 
@@ -499,7 +567,6 @@ export const getFoodScanDetail = async (req, res) => {
   }
 };
 
-
 export const deactivateIaDetection = async (req, res) => {
   const connection = await pool.getConnection();
   let transactionStarted = false;
@@ -533,6 +600,7 @@ export const deactivateIaDetection = async (req, res) => {
 
     if (detectionRows.length === 0) {
       await connection.rollback();
+      transactionStarted = false;
       return res.status(404).json({ message: "Registro no encontrado" });
     }
 
@@ -540,8 +608,27 @@ export const deactivateIaDetection = async (req, res) => {
 
     if (String(detection.status || "").toLowerCase() !== "active") {
       await connection.rollback();
+      transactionStarted = false;
       return res.status(404).json({ message: "Registro no encontrado o ya está inactivo" });
     }
+
+    const [mlRows] = await connection.query(
+      `
+      SELECT
+        COALESCE(SUM(
+          CASE
+            WHEN LOWER(TRIM(f.unit_measure)) = 'ml' THEN COALESCE(fd.quantity, 0)
+            ELSE 0
+          END
+        ), 0) AS water_ml
+      FROM food_detected fd
+      INNER JOIN foods f ON f.id = fd.foods_id
+      WHERE fd.ia_detection_id = ?
+      `,
+      [detectionId]
+    );
+
+    const waterMlToSubtract = Number(mlRows?.[0]?.water_ml || 0);
 
     await connection.query(
       `
@@ -565,15 +652,19 @@ export const deactivateIaDetection = async (req, res) => {
         proteins = GREATEST(0, COALESCE(proteins, 0) - ?),
         carbohydrates = GREATEST(0, COALESCE(carbohydrates, 0) - ?),
         fats = GREATEST(0, COALESCE(fats, 0) - ?),
-        net_kcal = GREATEST(
-          0,
-          COALESCE(daily_kcal_objective, 0) - (
-            GREATEST(0, COALESCE(food_kcal, 0) - ?) 
-          )
-        )
+        net_kcal = GREATEST(0, COALESCE(net_kcal, 0) - ?),
+        water_ml = GREATEST(0, COALESCE(water_ml, 0) - ?)
       WHERE id = ?
       `,
-      [calories, proteins, carbs, fats, calories, detection.id_daily_log]
+      [
+        calories,
+        proteins,
+        carbs,
+        fats,
+        calories,
+        waterMlToSubtract,
+        detection.id_daily_log,
+      ]
     );
 
     await connection.commit();

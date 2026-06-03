@@ -26,7 +26,7 @@ const generateWithRetry = async (models, parts, maxRetries = 4) => {
         const retryable =
           status === 503 || // sobrecarga
           status === 429 || // rate limit
-          status === 500;   // error interno
+          status === 500; // error interno
 
         console.warn(
           `Error en ${modelName} intento ${attempt}:`,
@@ -58,10 +58,8 @@ export const analyzeFoodImage = async (
   existingFoods
 ) => {
   try {
-    /* ===== LIMPIAR BASE64 ===== */
     const cleanBase64 = imageBase64.replace(/^data:.*;base64,/, "");
 
-    /* ===== PROMPT ===== */
     const prompt = `
 Eres un nutricionista experto y una IA de reconocimiento de alimentos.
 Analiza la imagen adjunta e identifica los alimentos y sus cantidades aproximadas.
@@ -79,7 +77,8 @@ REGLAS:
 1. Usa el ID si el alimento existe.
 2. Si no existe, usa id: null y is_new: true.
 3. Calcula macros totales.
-4. Genera comentario corto motivacional.
+4. Genera comentario corto motivacional pero realista y con recomendaciones.
+5. Si no detectas ningún alimento, responde con detected_foods: [] y totals en 0.
 
 RESPONDE SOLO JSON:
 
@@ -108,7 +107,6 @@ RESPONDE SOLO JSON:
 }
 `;
 
-    /* ===== IMAGEN ===== */
     const imageParts = [
       {
         inlineData: {
@@ -118,18 +116,12 @@ RESPONDE SOLO JSON:
       },
     ];
 
-    /* ===== MODELOS (orden de fallback) ===== */
-    const models = [
-      "gemini-2.5-flash",
-      "gemini-2.5-flash-lite",
-    ];
+    const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
-    /* ===== LLAMADA CON RETRY ===== */
     const result = await generateWithRetry(models, [prompt, ...imageParts]);
 
     const responseText = result.response.text();
 
-    /* ===== LIMPIAR RESPUESTA ===== */
     const cleanedJson = responseText
       .replace(/```json\s*/g, "")
       .replace(/```/g, "")
