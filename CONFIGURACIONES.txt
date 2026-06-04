@@ -1,0 +1,2 @@
+el archivo .zip se encuentra el .env para las variables de entorno que se configuran en el host
+en este caso render usar en local modificar usuarios para las bdd en mysql
